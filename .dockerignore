@@ -6,6 +6,7 @@ LICENSE
 README.md
 tools/m3u8-Downloader-Go
 dockerfile
+tools/*.exe
 
 # Python caches and virtualenv
 __pycache__/

@@ -77,7 +77,6 @@ out/
 # Go
 bin/
 pkg/
-*.exe
 *.test
 
 # Rust

@@ -96,7 +96,7 @@ class Downloader(ABC):
         if not html:
             logger.error("获取html失败")
             return None
-        with open(os.path.join(self.path, avid, avid+".html"), "w+") as f:
+        with open(os.path.join(self.path, avid, avid+".html"), "w+", encoding='utf-8') as f:
             f.write(html)
 
         # 从html中解析元数据，返回MissAVInfo结构体
@@ -136,7 +136,7 @@ class Downloader(ABC):
                     return False
             
             # 转mp4
-            convert = f"ffmpeg -i {os.path.join(self.path, avid, avid+'.ts')} -c copy -f mp4 {os.path.join(self.path, avid, avid+'.mp4')}"
+            convert = f"{ffmpeg_tool} -i {os.path.join(self.path, avid, avid+'.ts')} -c copy -f mp4 {os.path.join(self.path, avid, avid+'.mp4')}"
             logger.debug(convert)
             if os.system(convert) != 0:
                 return False

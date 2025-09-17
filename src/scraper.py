@@ -222,7 +222,7 @@ class Sracper:
         for av, url in metadata.actress.items():
             logger.debug(av)
             # 判断是否已经存在
-            if os.path.exists(os.path.join(os.path.join(self.path, "thumb", av+".jpg"))):
+            if os.path.exists(os.path.join(self.path, "thumb", av+".jpg")):
                 logger.info(f"av {av} already exist")
                 continue
             else:
