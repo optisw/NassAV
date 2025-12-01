@@ -1,4 +1,5 @@
 import json
+import random
 from loguru import logger
 import os
 import platform
@@ -42,6 +43,10 @@ for downloader in configs["Downloader"]:
         missAVDomain = downloader["domain"]
         break
 logger.info(f"missav domain: {missAVDomain}")
+
+scraperDomain = random.choice(configs["ScraperDomain"])
+logger.info(f"scraper domain: {scraperDomain}")
+
 
 # 初始化下载器
 download_tool = f"'{project_root}/tools/m3u8-Downloader-Go'"

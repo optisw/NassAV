@@ -78,7 +78,7 @@ headers = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.5",
     "Cookie": "PHPSESSID=kesgcjj4fklf91ojbaocbkbao2; age=verified; existmag=mag",
-    "Referer": "https://www.javbus.com",
+    "Referer": scraperDomain,
     "Sec-Fetch-Mode": "navigate"
 }
      
@@ -95,7 +95,7 @@ class Sracper:
             'https': proxy
         } if proxy else None
         self.timeout = timeout
-        self.domain = "www.javbus.com"
+        self.domain = scraperDomain
 
     def scrape(self, avid: str) -> Optional[AVMetadata]:
         # 获取html
