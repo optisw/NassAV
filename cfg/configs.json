@@ -1,9 +1,9 @@
 {
     "LogPath": "./logs",
-    "SavePath": "/vol2/1000/MissAV",
+    "SavePath": "./MissAV",
     "DBPath": "./db/downloaded.db",
     "QueuePath": "./db/download_queue.txt",
-    "Proxy": "http://127.0.0.1:7897",
+    "Proxy": "",
     "IsNeedVideoProxy": true,
     "ScraperDomain": [
         "www.javbus.com",
