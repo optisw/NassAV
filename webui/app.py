@@ -6,6 +6,7 @@ import uuid
 import queue
 import threading
 import subprocess
+import shutil
 from typing import Dict, Optional, List
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
@@ -28,22 +29,54 @@ def get_save_path(cfg: dict) -> str:
     sp = cfg.get("SavePath")
     if not sp:
         raise RuntimeError("configs.json 缺少 SavePath 字段")
-    # 相对路径统一转成容器内绝对路径（以 /NASSAV 为基准）
     if not os.path.isabs(sp):
         sp = os.path.normpath(os.path.join(APP_ROOT, sp))
     return sp
 
 # ---- 任务状态存储（内存）----
-# status: queued | running | done | error
+# status: queued | running | done | error | stopped
 TASKS: Dict[str, dict] = {}
 TASK_QUEUE: "queue.Queue[dict]" = queue.Queue()
 
 PERCENT_RE = re.compile(r"(\d{1,3})\s*%")
-
 MAX_LOG_LINES = 3000  # 每个任务最多保留日志行数
+
+# ---- 停止/取消控制 ----
+CONTROL_LOCK = threading.Lock()
+CURRENT_TASK_ID: Optional[str] = None
+CURRENT_PROC: Optional[subprocess.Popen] = None
+CANCEL_ALL_FLAG = False  # 一键停止标志
 
 def normalize_plate(s: str) -> str:
     return s.strip().upper()
+
+def _append_log(task_id: str, line: str):
+    t = TASKS.get(task_id)
+    if not t:
+        return
+    logs = t.setdefault("logs", [])
+    seq = t.setdefault("log_seq", 0) + 1
+    t["log_seq"] = seq
+    logs.append({"seq": seq, "line": line})
+    if len(logs) > MAX_LOG_LINES:
+        drop = len(logs) - MAX_LOG_LINES
+        del logs[:drop]
+
+def _safe_remove_plate_dir(save_path: str, plate: str) -> bool:
+    """
+    删除 SavePath/<PLATE>/ 目录（仅允许在 SavePath 内删除，避免误删）
+    """
+    plate = normalize_plate(plate)
+    target = os.path.normpath(os.path.join(save_path, plate))
+    save_path_norm = os.path.normpath(save_path)
+
+    # 安全校验：target 必须在 save_path 下
+    if not (target == save_path_norm or target.startswith(save_path_norm + os.sep)):
+        return False
+    if os.path.isdir(target):
+        shutil.rmtree(target, ignore_errors=True)
+        return True
+    return False
 
 def guess_output_file(save_path: str, plate: str) -> Optional[str]:
     plate = normalize_plate(plate)
@@ -57,20 +90,13 @@ def guess_output_file(save_path: str, plate: str) -> Optional[str]:
                 return os.path.join(folder, fn)
     return None
 
-def _append_log(task_id: str, line: str):
-    t = TASKS.get(task_id)
-    if not t:
-        return
-    logs = t.setdefault("logs", [])
-    seq = t.setdefault("log_seq", 0) + 1
-    t["log_seq"] = seq
-    logs.append({"seq": seq, "line": line})
-    # 限制行数
-    if len(logs) > MAX_LOG_LINES:
-        drop = len(logs) - MAX_LOG_LINES
-        del logs[:drop]
+def _is_cancel_requested() -> bool:
+    with CONTROL_LOCK:
+        return CANCEL_ALL_FLAG
 
 def run_download(task_id: str, plate: str):
+    global CURRENT_TASK_ID, CURRENT_PROC
+
     try:
         cfg = load_cfg()
         save_path = get_save_path(cfg)
@@ -94,13 +120,13 @@ def run_download(task_id: str, plate: str):
         "logs": [],
         "log_seq": 0,
     })
+
     _append_log(task_id, f"[INFO] 使用解释器：{VENV_PY}")
     _append_log(task_id, f"[INFO] 工作目录：{APP_ROOT}")
     _append_log(task_id, f"[INFO] SavePath：{save_path}")
     _append_log(task_id, f"[INFO] 执行：{VENV_PY} main.py {plate}")
 
     cmd = [VENV_PY, "main.py", plate]
-
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
 
@@ -115,17 +141,25 @@ def run_download(task_id: str, plate: str):
         env=env,
     )
 
+    # 记录当前运行的进程（供 stop 使用）
+    with CONTROL_LOCK:
+        CURRENT_TASK_ID = task_id
+        CURRENT_PROC = proc
+
     last_percent = 0
     try:
         assert proc.stdout is not None
         for raw in proc.stdout:
+            if _is_cancel_requested():
+                _append_log(task_id, "[INFO] 收到停止指令，正在终止…")
+                break
+
             line = raw.rstrip("\n")
             if not line:
                 continue
 
             _append_log(task_id, line)
 
-            # 尝试从输出里抓 “xx%”
             m = PERCENT_RE.search(line)
             if m:
                 p = int(m.group(1))
@@ -133,7 +167,6 @@ def run_download(task_id: str, plate: str):
                 if p >= last_percent:
                     last_percent = p
             else:
-                # 无百分比时，让 UI 不至于卡死（最多推到 95）
                 if last_percent < 95:
                     last_percent = min(95, last_percent + 1)
 
@@ -143,13 +176,32 @@ def run_download(task_id: str, plate: str):
                 "updated_at": time.time(),
             })
 
+        # 如果是取消：杀进程并删目录
+        if _is_cancel_requested():
+            try:
+                if proc.poll() is None:
+                    proc.kill()
+            except Exception:
+                pass
+
+            _safe_remove_plate_dir(save_path, plate)
+
+            TASKS[task_id].update({
+                "status": "stopped",
+                "percent": last_percent,
+                "message": "已停止",
+                "updated_at": time.time(),
+            })
+            _append_log(task_id, "[INFO] 已停止任务并清理目录")
+            return
+
         code = proc.wait()
         if code == 0:
             out = guess_output_file(save_path, plate)
             TASKS[task_id].update({
                 "status": "done",
                 "percent": 100,
-                "message": "完成，可下载",
+                "message": "完成",
                 "file": out,
                 "updated_at": time.time(),
             })
@@ -173,23 +225,36 @@ def run_download(task_id: str, plate: str):
         })
         _append_log(task_id, f"[ERROR] 运行异常：{e}")
     finally:
-        try:
-            if proc.poll() is None:
-                proc.kill()
-        except Exception:
-            pass
+        # 清理当前进程引用
+        with CONTROL_LOCK:
+            if CURRENT_TASK_ID == task_id:
+                CURRENT_TASK_ID = None
+                CURRENT_PROC = None
 
 def worker_loop():
+    global CANCEL_ALL_FLAG
     while True:
         item = TASK_QUEUE.get()
         try:
+            # 如果停止标志已经置位，直接把队列任务标记为 stopped（不执行）
+            if _is_cancel_requested():
+                tid = item["task_id"]
+                TASKS[tid].update({
+                    "status": "stopped",
+                    "percent": 0,
+                    "message": "已停止（未开始执行）",
+                    "updated_at": time.time(),
+                })
+                _append_log(tid, "[INFO] 队列任务已停止（未开始执行）")
+                continue
+
             task_id = item["task_id"]
             plate = item["plate"]
             run_download(task_id, plate)
         finally:
             TASK_QUEUE.task_done()
 
-app = FastAPI(title="NASSAV Simple WebUI")
+app = FastAPI(title="AVTool WebUI")
 
 STATIC_DIR = os.path.join(APP_ROOT, "webui", "static")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -226,45 +291,60 @@ def api_start(plate: str = Form(...)):
     TASK_QUEUE.put({"task_id": task_id, "plate": plate})
     return TASKS[task_id]
 
-@app.post("/api/start_batch")
-async def api_start_batch(file: UploadFile = File(...)):
-    content = (await file.read()).decode("utf-8", errors="ignore")
-    plates: List[str] = []
-    for line in content.splitlines():
-        p = normalize_plate(line)
-        if p:
-            plates.append(p)
+@app.post("/api/stop")
+def api_stop():
+    """
+    一键停止：
+    - 终止正在运行的下载进程
+    - 清空队列中的后续任务
+    - 删除正在下载车牌对应目录
+    """
+    global CANCEL_ALL_FLAG, CURRENT_PROC, CURRENT_TASK_ID
 
-    if not plates:
-        raise HTTPException(status_code=400, detail="txt 文件里没有有效车牌号")
+    with CONTROL_LOCK:
+        CANCEL_ALL_FLAG = True
+        proc = CURRENT_PROC
+        running_tid = CURRENT_TASK_ID
 
-    batch_id = uuid.uuid4().hex
-    task_ids = []
-    for p in plates:
-        task_id = uuid.uuid4().hex
-        TASKS[task_id] = {
-            "task_id": task_id,
-            "batch_id": batch_id,
-            "plate": p,
-            "status": "queued",
-            "percent": 0,
-            "message": "已进入队列",
-            "created_at": time.time(),
-            "updated_at": time.time(),
-            "logs": [],
-            "log_seq": 0,
-        }
-        task_ids.append(task_id)
-        TASK_QUEUE.put({"task_id": task_id, "plate": p})
+    # 先杀进程（run_download 会负责删目录和标记 stopped）
+    if proc is not None:
+        try:
+            if proc.poll() is None:
+                proc.kill()
+        except Exception:
+            pass
 
-    return {"batch_id": batch_id, "task_ids": task_ids, "count": len(task_ids)}
+    # 清空队列（把未执行的任务标为 stopped）
+    cleared = 0
+    while True:
+        try:
+            item = TASK_QUEUE.get_nowait()
+        except queue.Empty:
+            break
+        try:
+            tid = item["task_id"]
+            TASKS[tid].update({
+                "status": "stopped",
+                "percent": 0,
+                "message": "已停止（从队列移除）",
+                "updated_at": time.time(),
+            })
+            _append_log(tid, "[INFO] 已停止（从队列移除）")
+            cleared += 1
+        finally:
+            TASK_QUEUE.task_done()
+
+    # 停止只对当前队列有效，恢复开关，便于下一次重新下载
+    with CONTROL_LOCK:
+        CANCEL_ALL_FLAG = False
+
+    return {"ok": True, "running_task_id": running_tid, "cleared": cleared}
 
 @app.get("/api/progress/{task_id}")
 def api_progress(task_id: str):
     info = TASKS.get(task_id)
     if not info:
         raise HTTPException(status_code=404, detail="task_id 不存在")
-    # 避免一次性把 logs 全返回（太大）
     slim = dict(info)
     slim.pop("logs", None)
     return slim
@@ -286,7 +366,7 @@ def api_progress_stream(task_id: str):
             if payload != last_sent:
                 yield f"data: {payload}\n\n"
                 last_sent = payload
-            if info.get("status") in ("done", "error"):
+            if info.get("status") in ("done", "error", "stopped"):
                 break
             time.sleep(0.5)
 
@@ -304,15 +384,13 @@ def api_logs_stream(task_id: str):
             if not info:
                 break
             logs = info.get("logs", [])
-            # 推送新增行
             new = [x for x in logs if x["seq"] > last_seq]
             for item in new:
                 last_seq = item["seq"]
                 payload = json.dumps(item, ensure_ascii=False)
                 yield f"data: {payload}\n\n"
 
-            if info.get("status") in ("done", "error"):
-                # 最后再等一下，确保尾巴输出到位
+            if info.get("status") in ("done", "error", "stopped"):
                 time.sleep(0.2)
                 break
             time.sleep(0.2)
