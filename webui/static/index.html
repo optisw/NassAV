@@ -5,50 +5,84 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>NassAV</title>
   <style>
-    :root { --bg:#0b1220; --card:#121b2f; --text:#e8eefc; --muted:#9bb0d1; --accent:#4ea1ff; --danger:#ff5a7a; }
+    :root { --bg:#0b1220; --card:#121b2f; --text:#e8eefc; --muted:#9bb0d1; --accent:#306DF1; --danger:#ff5a7a; }
     body{margin:0;background:linear-gradient(180deg,#060b16,#0b1220);color:var(--text);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
     .wrap{max-width:760px;margin:40px auto;padding:0 16px}
     .card{background:rgba(18,27,47,.9);border:1px solid rgba(255,255,255,.08);border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.35);padding:18px}
     h1{font-size:20px;margin:0 0 12px 0;letter-spacing:.5px}
 
-    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-start}
+    .row{display:flex;gap:10px;align-items:flex-start}
+
+    /* 输入框：默认高度≈按钮高度，自动随行数增高 */
     textarea{
-      flex:1; min-width:260px; height:110px; resize:vertical;
+      flex:1;
+      min-width:260px;
+      height:40px;                /* ✅ 默认高度=按钮高度 */
+      max-height:220px;           /* ✅ 增高到上限后内部滚动 */
+      resize:none;
+      overflow:auto;
+
       background:#0a1225;border:1px solid rgba(255,255,255,.12);
-      color:var(--text);padding:10px 12px;border-radius:12px;outline:none;
+      color:var(--text);
+      padding:9px 12px;
+      border-radius:10px;
+      outline:none;
       line-height:1.4;
+      box-sizing:border-box;
+
+      /* ✅ 隐藏滚动条（仍可滚动） */
+      scrollbar-width:none;       /* Firefox */
+      -ms-overflow-style:none;    /* IE/Edge(old) */
     }
-    button{background:var(--accent);border:none;color:#061021;padding:10px 14px;border-radius:12px;cursor:pointer;font-weight:700}
+    textarea::-webkit-scrollbar{  /* Chrome/Safari */
+      width:0;height:0;
+    }
+
+    /* 下载按钮：正方形、#306DF1、白字、无圆角 */
+    button{
+      width:40px;height:40px;     /* ✅ 方形 */
+      background:var(--accent);
+      border:none;
+      color:#ffffff;
+      padding:0;
+      border-radius:0;            /* ✅ 无圆角 */
+      cursor:pointer;
+      font-weight:700;
+    }
     button:disabled{opacity:.6;cursor:not-allowed}
 
-    .hint{color:var(--muted);font-size:12px;margin-top:10px;line-height:1.5}
-
     .bar{height:12px;background:#0a1225;border-radius:999px;overflow:hidden;border:1px solid rgba(255,255,255,.12)}
-    .bar > div{height:100%;width:0%;background:linear-gradient(90deg,#4ea1ff,#7cf6ff);transition:width .25s ease}
+    .bar > div{height:100%;width:0%;background:linear-gradient(90deg,#306DF1,#7cf6ff);transition:width .25s ease}
 
-    .meta{display:flex;justify-content:space-between;gap:8px;color:var(--muted);font-size:12px;margin-top:8px}
+    .meta{
+      display:flex;
+      justify-content:space-between;
+      gap:8px;
+      color:var(--muted);
+      font-size:12px;
+      margin-top:8px
+    }
     .danger{color:var(--danger)}
 
-    /* ✅ 固定高度日志：不会把页面越撑越高 */
+    /* ✅ 固定高度日志：只滚内容，不撑页面；隐藏右侧滚动条 */
     .logwrap{
-      position:relative;
       margin-top:10px;
       background:#0a1225;border:1px solid rgba(255,255,255,.08);
       border-radius:12px;
-      padding:12px 12px 10px 12px;
-    }
-    .logtitle{
-      position:absolute; top:10px; right:12px;
-      font-size:12px; color:var(--muted);
-      user-select:none;
+      padding:10px 12px;
     }
     .log{
-      height:220px;               /* ✅ 高度固定 */
-      overflow-y:auto;            /* ✅ 内容滚动 */
+      height:220px;
+      overflow-y:auto;
       white-space:pre-wrap;
       color:var(--muted);
       font-size:12px;
-      padding-top:18px;           /* 给右上角状态留位置 */
+
+      scrollbar-width:none;
+      -ms-overflow-style:none;
+    }
+    .log::-webkit-scrollbar{
+      width:0;height:0;
     }
   </style>
 </head>
@@ -58,25 +92,21 @@
       <h1>NassAV</h1>
 
       <div class="row">
-        <textarea id="plate" placeholder="例如：XXX-001&#10;每行一个车牌号，可粘贴多行"></textarea>
+        <textarea id="plate" placeholder="例如：XXX-001"></textarea>
         <button id="btnStart">下载</button>
       </div>
 
       <div style="height:12px"></div>
       <div class="bar"><div id="barFill"></div></div>
+
       <div class="meta">
         <div id="percent">0%</div>
+        <!-- ✅ 右下角：车牌号 | 状态... -->
         <div id="status">就绪</div>
       </div>
 
       <div class="logwrap">
-        <div class="logtitle" id="logState">就绪</div>
         <div class="log" id="log">等待操作…</div>
-      </div>
-
-      <div class="hint" id="hint">
-        - 输入一个或多个车牌号（每行一个） → 点击“下载”<br/>
-        - 系统会按队列逐个下载（单线程顺序执行）<br/>
       </div>
     </div>
   </div>
@@ -87,12 +117,10 @@
   let esProgress = null;
   let esLog = null;
 
-  // 前端排队（把多行拆成数组，逐个 /api/start）
   let queue = [];
   let currentIndex = 0;
   let running = false;
 
-  // 为避免页面卡死：限制日志最大字符数
   const MAX_LOG_CHARS = 50000;
 
   function setProgress(p){
@@ -101,21 +129,16 @@
     $("percent").innerText = p + "%";
   }
 
-  function mapStatusText(status){
-    if(status === "done") return "已下载";
-    if(status === "error") return "失败";
-    // queued / running / null
-    return "下载中";
+  function statusTextFrom(status){
+    if(status === "done") return "已下载...";
+    if(status === "error") return "失败...";
+    return "下载中...";
   }
 
-  function setStatus(text, danger=false){
-    $("status").innerText = text;
+  function setStatusWithPlate(plate, status, danger=false){
+    const left = (plate && plate.trim()) ? plate.trim().toUpperCase() + " | " : "";
+    $("status").innerText = left + statusTextFrom(status);
     $("status").className = danger ? "danger" : "";
-  }
-
-  function setLogState(text, danger=false){
-    $("logState").innerText = text;
-    $("logState").className = danger ? "danger logtitle" : "logtitle";
   }
 
   function resetLog(){
@@ -125,11 +148,8 @@
 
   function appendLogLine(line){
     let cur = $("log").innerText || "";
-    // 如果是初始状态，先清空再写
     if(cur === "等待操作…") cur = "";
-
     cur += (line + "\n");
-    // 截断，避免无限增长导致页面无响应
     if(cur.length > MAX_LOG_CHARS){
       cur = cur.slice(cur.length - MAX_LOG_CHARS);
     }
@@ -145,7 +165,6 @@
   function parsePlates(){
     const raw = $("plate").value || "";
     const lines = raw.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
-    // 去重但保持顺序
     const seen = new Set();
     const out = [];
     for(const x of lines){
@@ -160,8 +179,8 @@
 
     queue = parsePlates();
     if(queue.length === 0){
-      setStatus("车牌号不能为空", true);
-      setLogState("失败", true);
+      setStatusWithPlate("", "error", true);
+      resetLog();
       return;
     }
 
@@ -170,8 +189,7 @@
     $("btnStart").disabled = true;
 
     setProgress(0);
-    setStatus("下载中");
-    setLogState("下载中");
+    setStatusWithPlate(queue[0], "running", false);
     resetLog();
 
     await runNext();
@@ -185,27 +203,23 @@
       running = false;
       $("btnStart").disabled = false;
       setProgress(100);
-      setStatus("已下载");
-      setLogState("已下载");
-      // ✅ 下载完成后清空日志到初始状态（你要求的）
-      resetLog();
+      setStatusWithPlate("", "done", false);
+      resetLog(); // ✅ 全部完成清空日志
       return;
     }
 
     const plate = queue[currentIndex];
     setProgress(0);
-    setStatus(`下载中（${currentIndex+1}/${queue.length}）`);
-    setLogState("下载中");
+    setStatusWithPlate(plate, "running", false);
     resetLog();
 
     // 提交任务
     const fd = new FormData();
     fd.append("plate", plate);
-    const res = await fetch("/api/start", { method:"POST", body: fd });
 
+    const res = await fetch("/api/start", { method:"POST", body: fd });
     if(!res.ok){
-      setStatus("提交失败", true);
-      setLogState("失败", true);
+      setStatusWithPlate(plate, "error", true);
       appendLogLine(await res.text());
       running = false;
       $("btnStart").disabled = false;
@@ -221,24 +235,20 @@
       const d = JSON.parse(evt.data);
       setProgress(d.percent || 0);
 
-      // 右上角状态文案
-      const st = mapStatusText(d.status);
-      setLogState(st, d.status === "error");
+      // ✅ 右下角显示：车牌号 | 状态...
+      setStatusWithPlate(plate, d.status, d.status === "error");
 
       if(d.status === "done"){
         closeStreams();
-        // ✅ 单个下载完成：清空日志到初始状态
-        resetLog();
+        resetLog();           // ✅ 单个下载完成就清空日志
         currentIndex += 1;
         await runNext();
       }
       if(d.status === "error"){
         closeStreams();
-        setStatus("失败", true);
-        setLogState("失败", true);
-        // ✅ 失败也清空到初始状态（按你的“完成后清空”逻辑，这里更稳）
-        // 如果你想失败保留日志，我也可以改。
-        setTimeout(()=>resetLog(), 300);
+        setStatusWithPlate(plate, "error", true);
+        // 失败后也清空回初始（你之前的“完成后清空”逻辑，我保持一致）
+        setTimeout(()=>resetLog(), 200);
         running = false;
         $("btnStart").disabled = false;
       }
@@ -252,7 +262,17 @@
     };
   }
 
+  // ✅ 输入框随内容自动增高
+  function autoResize(){
+    const ta = $("plate");
+    ta.style.height = "40px"; // 回到初始高度再测
+    const newH = Math.min(220, ta.scrollHeight);
+    ta.style.height = newH + "px";
+  }
+
   $("btnStart").addEventListener("click", startQueue);
+  $("plate").addEventListener("input", autoResize);
+  window.addEventListener("load", autoResize);
 </script>
 
 </body>
