@@ -13,7 +13,6 @@ git clone https://github.com/optisw/NassAV.git
 cd NassAV
 
 docker build -t nassav:latest .
-
 docker run -d \
   --name nassav \
   --restart always \
