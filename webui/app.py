@@ -9,7 +9,7 @@ import subprocess
 import shutil
 from typing import Dict, Optional, List
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -17,13 +17,9 @@ APP_ROOT = os.environ.get("NASSAV_ROOT", "/NASSAV")
 CONFIG_PATH = os.environ.get("NASSAV_CONFIG", os.path.join(APP_ROOT, "cfg", "configs.json"))
 VENV_PY = os.path.join(APP_ROOT, "bin", "python")
 
-# ---- 读取配置（主要为了拿 SavePath，找到最终 mp4）----
 def load_cfg() -> dict:
-    try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        raise RuntimeError(f"无法读取配置文件：{CONFIG_PATH}。错误：{e}")
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 def get_save_path(cfg: dict) -> str:
     sp = cfg.get("SavePath")
@@ -33,19 +29,20 @@ def get_save_path(cfg: dict) -> str:
         sp = os.path.normpath(os.path.join(APP_ROOT, sp))
     return sp
 
-# ---- 任务状态存储（内存）----
-# status: queued | running | done | error | stopped
 TASKS: Dict[str, dict] = {}
 TASK_QUEUE: "queue.Queue[dict]" = queue.Queue()
 
 PERCENT_RE = re.compile(r"(\d{1,3})\s*%")
-MAX_LOG_LINES = 3000  # 每个任务最多保留日志行数
+MAX_LOG_LINES = 3000
 
-# ---- 停止/取消控制 ----
+# ---- 停止控制：用 Event 避免竞态 ----
+STOP_EVENT = threading.Event()
+
 CONTROL_LOCK = threading.Lock()
 CURRENT_TASK_ID: Optional[str] = None
 CURRENT_PROC: Optional[subprocess.Popen] = None
-CANCEL_ALL_FLAG = False  # 一键停止标志
+CURRENT_PLATE: Optional[str] = None
+CURRENT_SAVE_PATH: Optional[str] = None
 
 def normalize_plate(s: str) -> str:
     return s.strip().upper()
@@ -59,20 +56,20 @@ def _append_log(task_id: str, line: str):
     t["log_seq"] = seq
     logs.append({"seq": seq, "line": line})
     if len(logs) > MAX_LOG_LINES:
-        drop = len(logs) - MAX_LOG_LINES
-        del logs[:drop]
+        del logs[: len(logs) - MAX_LOG_LINES]
 
 def _safe_remove_plate_dir(save_path: str, plate: str) -> bool:
     """
-    删除 SavePath/<PLATE>/ 目录（仅允许在 SavePath 内删除，避免误删）
+    删除 SavePath/<PLATE>/ 目录（并做路径安全校验）
     """
     plate = normalize_plate(plate)
-    target = os.path.normpath(os.path.join(save_path, plate))
     save_path_norm = os.path.normpath(save_path)
+    target = os.path.normpath(os.path.join(save_path_norm, plate))
 
-    # 安全校验：target 必须在 save_path 下
+    # target 必须在 save_path 下
     if not (target == save_path_norm or target.startswith(save_path_norm + os.sep)):
         return False
+
     if os.path.isdir(target):
         shutil.rmtree(target, ignore_errors=True)
         return True
@@ -90,12 +87,8 @@ def guess_output_file(save_path: str, plate: str) -> Optional[str]:
                 return os.path.join(folder, fn)
     return None
 
-def _is_cancel_requested() -> bool:
-    with CONTROL_LOCK:
-        return CANCEL_ALL_FLAG
-
 def run_download(task_id: str, plate: str):
-    global CURRENT_TASK_ID, CURRENT_PROC
+    global CURRENT_TASK_ID, CURRENT_PROC, CURRENT_PLATE, CURRENT_SAVE_PATH
 
     try:
         cfg = load_cfg()
@@ -121,8 +114,6 @@ def run_download(task_id: str, plate: str):
         "log_seq": 0,
     })
 
-    _append_log(task_id, f"[INFO] 使用解释器：{VENV_PY}")
-    _append_log(task_id, f"[INFO] 工作目录：{APP_ROOT}")
     _append_log(task_id, f"[INFO] SavePath：{save_path}")
     _append_log(task_id, f"[INFO] 执行：{VENV_PY} main.py {plate}")
 
@@ -141,16 +132,18 @@ def run_download(task_id: str, plate: str):
         env=env,
     )
 
-    # 记录当前运行的进程（供 stop 使用）
     with CONTROL_LOCK:
         CURRENT_TASK_ID = task_id
         CURRENT_PROC = proc
+        CURRENT_PLATE = plate
+        CURRENT_SAVE_PATH = save_path
 
     last_percent = 0
     try:
         assert proc.stdout is not None
+
         for raw in proc.stdout:
-            if _is_cancel_requested():
+            if STOP_EVENT.is_set():
                 _append_log(task_id, "[INFO] 收到停止指令，正在终止…")
                 break
 
@@ -162,8 +155,7 @@ def run_download(task_id: str, plate: str):
 
             m = PERCENT_RE.search(line)
             if m:
-                p = int(m.group(1))
-                p = max(0, min(100, p))
+                p = max(0, min(100, int(m.group(1))))
                 if p >= last_percent:
                     last_percent = p
             else:
@@ -176,15 +168,20 @@ def run_download(task_id: str, plate: str):
                 "updated_at": time.time(),
             })
 
-        # 如果是取消：杀进程并删目录
-        if _is_cancel_requested():
+        # 让进程结束（如果 stop 已经触发，通常这里会很快）
+        code = proc.wait()
+
+        # ✅ 无论退出码是什么，只要 STOP_EVENT 触发，就按“停止”处理，并删除目录
+        if STOP_EVENT.is_set():
             try:
                 if proc.poll() is None:
                     proc.kill()
             except Exception:
                 pass
 
-            _safe_remove_plate_dir(save_path, plate)
+            removed = _safe_remove_plate_dir(save_path, plate)
+            _append_log(task_id, f"[INFO] 停止任务：exit_code={code}")
+            _append_log(task_id, f"[INFO] 清理目录：{os.path.join(save_path, normalize_plate(plate))} -> {'OK' if removed else 'NOT_FOUND/FAIL'}")
 
             TASKS[task_id].update({
                 "status": "stopped",
@@ -192,10 +189,9 @@ def run_download(task_id: str, plate: str):
                 "message": "已停止",
                 "updated_at": time.time(),
             })
-            _append_log(task_id, "[INFO] 已停止任务并清理目录")
             return
 
-        code = proc.wait()
+        # 正常结束
         if code == 0:
             out = guess_output_file(save_path, plate)
             TASKS[task_id].update({
@@ -206,10 +202,6 @@ def run_download(task_id: str, plate: str):
                 "updated_at": time.time(),
             })
             _append_log(task_id, "[INFO] 任务完成（exit code 0）")
-            if out:
-                _append_log(task_id, f"[INFO] 成品文件：{out}")
-            else:
-                _append_log(task_id, "[WARN] 未找到 mp4（可能输出命名不同或仍在转换）")
         else:
             TASKS[task_id].update({
                 "status": "error",
@@ -217,6 +209,7 @@ def run_download(task_id: str, plate: str):
                 "updated_at": time.time(),
             })
             _append_log(task_id, f"[ERROR] 下载失败，退出码={code}")
+
     except Exception as e:
         TASKS[task_id].update({
             "status": "error",
@@ -224,20 +217,22 @@ def run_download(task_id: str, plate: str):
             "updated_at": time.time(),
         })
         _append_log(task_id, f"[ERROR] 运行异常：{e}")
+
     finally:
-        # 清理当前进程引用
         with CONTROL_LOCK:
-            if CURRENT_TASK_ID == task_id:
-                CURRENT_TASK_ID = None
-                CURRENT_PROC = None
+            CURRENT_TASK_ID = None
+            CURRENT_PROC = None
+            CURRENT_PLATE = None
+            CURRENT_SAVE_PATH = None
+        # ✅ 在当前任务收尾后再清 stop 标志，避免竞态
+        if STOP_EVENT.is_set():
+            STOP_EVENT.clear()
 
 def worker_loop():
-    global CANCEL_ALL_FLAG
     while True:
         item = TASK_QUEUE.get()
         try:
-            # 如果停止标志已经置位，直接把队列任务标记为 stopped（不执行）
-            if _is_cancel_requested():
+            if STOP_EVENT.is_set():
                 tid = item["task_id"]
                 TASKS[tid].update({
                     "status": "stopped",
@@ -248,9 +243,7 @@ def worker_loop():
                 _append_log(tid, "[INFO] 队列任务已停止（未开始执行）")
                 continue
 
-            task_id = item["task_id"]
-            plate = item["plate"]
-            run_download(task_id, plate)
+            run_download(item["task_id"], item["plate"])
         finally:
             TASK_QUEUE.task_done()
 
@@ -259,14 +252,11 @@ app = FastAPI(title="AVTool WebUI")
 STATIC_DIR = os.path.join(APP_ROOT, "webui", "static")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-t = threading.Thread(target=worker_loop, daemon=True)
-t.start()
+threading.Thread(target=worker_loop, daemon=True).start()
 
 @app.get("/", response_class=HTMLResponse)
 def index():
     html_path = os.path.join(STATIC_DIR, "index.html")
-    if not os.path.exists(html_path):
-        return HTMLResponse("<h3>index.html not found</h3>", status_code=500)
     with open(html_path, "r", encoding="utf-8") as f:
         return HTMLResponse(f.read())
 
@@ -295,18 +285,19 @@ def api_start(plate: str = Form(...)):
 def api_stop():
     """
     一键停止：
-    - 终止正在运行的下载进程
-    - 清空队列中的后续任务
-    - 删除正在下载车牌对应目录
+    - 标记 STOP_EVENT
+    - kill 当前进程（如果存在）
+    - 清空队列并标记 stopped
+    注意：STOP_EVENT 不在这里清，等 run_download 收尾后清，确保能触发删目录。
     """
-    global CANCEL_ALL_FLAG, CURRENT_PROC, CURRENT_TASK_ID
+    STOP_EVENT.set()
 
     with CONTROL_LOCK:
-        CANCEL_ALL_FLAG = True
         proc = CURRENT_PROC
         running_tid = CURRENT_TASK_ID
+        running_plate = CURRENT_PLATE
+        running_save = CURRENT_SAVE_PATH
 
-    # 先杀进程（run_download 会负责删目录和标记 stopped）
     if proc is not None:
         try:
             if proc.poll() is None:
@@ -314,7 +305,7 @@ def api_stop():
         except Exception:
             pass
 
-    # 清空队列（把未执行的任务标为 stopped）
+    # 清空队列
     cleared = 0
     while True:
         try:
@@ -334,11 +325,19 @@ def api_stop():
         finally:
             TASK_QUEUE.task_done()
 
-    # 停止只对当前队列有效，恢复开关，便于下一次重新下载
-    with CONTROL_LOCK:
-        CANCEL_ALL_FLAG = False
+    # ✅ 再做一次兜底：如果目录已经创建但 run_download 还未来得及清理，这里也尝试删除
+    removed = False
+    if running_plate and running_save:
+        removed = _safe_remove_plate_dir(running_save, running_plate)
 
-    return {"ok": True, "running_task_id": running_tid, "cleared": cleared}
+    return {
+        "ok": True,
+        "running_task_id": running_tid,
+        "running_plate": running_plate,
+        "cleared": cleared,
+        "removed_running_dir": removed,
+        "running_dir": (os.path.join(running_save, normalize_plate(running_plate)) if running_plate and running_save else None)
+    }
 
 @app.get("/api/progress/{task_id}")
 def api_progress(task_id: str):
