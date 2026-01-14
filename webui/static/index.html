@@ -5,24 +5,16 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>AVTool</title>
   <style>
-    :root { --bg:#0b1220; --card:#121b2f; --text:#e8eefc; --muted:#9bb0d1; --accent:#306DF1; --danger:#ff5a7a; }
+    :root { --bg:#0b1220; --card:#121b2f; --text:#e8eefc; --muted:#9bb0d1; --accent1:#306DF1; --accent2:#7cf6ff; --danger:#ff5a7a; }
 
-    /* ✅ 修复“上下两块背景色”问题：html/body 同底色 + body 100vh */
-    html, body{
-      height:100%;
-      background-color:var(--bg);
-    }
+    html, body{ height:100%; background-color:var(--bg); }
     body{
-      margin:0;
-      min-height:100vh;
-      background-color:var(--bg);
+      margin:0; min-height:100vh; background-color:var(--bg);
       color:var(--text);
       font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto;
     }
 
     .wrap{max-width:760px;margin:40px auto;padding:0 16px}
-
-    /* ✅ 卡片不透明，避免透底造成“分层”错觉 */
     .card{
       background:var(--card);
       border:1px solid rgba(255,255,255,.08);
@@ -31,24 +23,16 @@
       padding:18px
     }
 
-    /* ✅ 标题不加粗 */
     h1{
-      font-size:20px;
-      margin:0 0 12px 0;
-      letter-spacing:.5px;
-      font-weight:400;
+      font-size:20px;margin:0 0 12px 0;letter-spacing:.5px;font-weight:400;
     }
 
     .row{display:flex;gap:10px;align-items:flex-start}
 
-    /* 输入框：默认高度≈按钮高度，自动随行数增高；隐藏滚动条（仍可滚动） */
     textarea{
-      flex:1;
-      min-width:260px;
-      height:40px;
-      max-height:220px;
-      resize:none;
-      overflow:auto;
+      flex:1; min-width:260px;
+      height:40px; max-height:220px;
+      resize:none; overflow:auto;
 
       background:#0a1225;
       border:1px solid rgba(255,255,255,.12);
@@ -64,58 +48,76 @@
     }
     textarea::-webkit-scrollbar{ width:0;height:0; }
 
-    /* ✅ 按钮：圆角、与输入框等高、#306DF1、白字、不加粗 */
-    button{
-      height:40px;
+    /* 按钮统一：比输入框低 10% => 36px */
+    .btn{
+      height:36px;
       padding:0 16px;
-      background:var(--accent);
       border:none;
-      color:#ffffff;
       border-radius:10px;
       cursor:pointer;
       font-weight:400;
       white-space:nowrap;
+      color:#fff;
     }
-    button:disabled{opacity:.6;cursor:not-allowed}
+    .btn:disabled{opacity:.6;cursor:not-allowed}
+
+    /* ✅ 下载按钮：渐变 + 悬停流光 */
+    .btn-primary{
+      position:relative;
+      background:linear-gradient(90deg,var(--accent1),var(--accent2));
+      overflow:hidden;
+    }
+    .btn-primary::after{
+      content:"";
+      position:absolute;
+      top:0; left:-60%;
+      width:40%;
+      height:100%;
+      background:linear-gradient(90deg, rgba(255,255,255,0), rgba(255,255,255,.35), rgba(255,255,255,0));
+      transform:skewX(-20deg);
+      opacity:0;
+    }
+    .btn-primary:hover::after{
+      opacity:1;
+      animation:shine 0.9s ease-in-out;
+    }
+    @keyframes shine{
+      from{ left:-60%; }
+      to{ left:140%; }
+    }
+
+    /* 停止按钮：红色系但不刺眼 */
+    .btn-stop{
+      background:rgba(255,90,122,.18);
+      border:1px solid rgba(255,90,122,.45);
+    }
+    .btn-stop:hover{
+      background:rgba(255,90,122,.26);
+    }
 
     .bar{
-      height:12px;
-      background:#0a1225;
-      border-radius:999px;
-      overflow:hidden;
-      border:1px solid rgba(255,255,255,.12)
+      height:12px;background:#0a1225;border-radius:999px;overflow:hidden;border:1px solid rgba(255,255,255,.12)
     }
     .bar > div{
-      height:100%;
-      width:0%;
-      background:linear-gradient(90deg,#306DF1,#7cf6ff);
+      height:100%;width:0%;
+      background:linear-gradient(90deg,var(--accent1),var(--accent2));
       transition:width .25s ease
     }
 
     .meta{
-      display:flex;
-      justify-content:space-between;
-      gap:8px;
-      color:var(--muted);
-      font-size:12px;
-      margin-top:8px
+      display:flex;justify-content:space-between;gap:8px;
+      color:var(--muted);font-size:12px;margin-top:8px
     }
     .danger{color:var(--danger)}
 
-    /* 固定高度日志：只滚内容，不撑页面；隐藏滚动条 */
     .logwrap{
       margin-top:10px;
-      background:#0a1225;
-      border:1px solid rgba(255,255,255,.08);
-      border-radius:12px;
-      padding:10px 12px;
+      background:#0a1225;border:1px solid rgba(255,255,255,.08);
+      border-radius:12px;padding:10px 12px;
     }
     .log{
-      height:220px;
-      overflow-y:auto;
-      white-space:pre-wrap;
-      color:var(--muted);
-      font-size:12px;
+      height:220px;overflow-y:auto;white-space:pre-wrap;
+      color:var(--muted);font-size:12px;
 
       scrollbar-width:none;
       -ms-overflow-style:none;
@@ -130,7 +132,8 @@
 
       <div class="row">
         <textarea id="plate" placeholder="例如：XXX-001"></textarea>
-        <button id="btnStart">下载</button>
+        <button id="btnStop" class="btn btn-stop" disabled>停止</button>
+        <button id="btnStart" class="btn btn-primary">下载</button>
       </div>
 
       <div style="height:12px"></div>
@@ -138,7 +141,6 @@
 
       <div class="meta">
         <div id="percent">0%</div>
-        <!-- 右下角：当前车牌 | 状态... -->
         <div id="status">就绪</div>
       </div>
 
@@ -168,6 +170,7 @@
 
   function statusTextFrom(status){
     if(status === "done") return "已下载...";
+    if(status === "stopped") return "已停止...";
     if(status === "error") return "失败...";
     return "下载中...";
   }
@@ -224,6 +227,7 @@
     running = true;
     currentIndex = 0;
     $("btnStart").disabled = true;
+    $("btnStop").disabled = false;
 
     setProgress(0);
     setStatusWithPlate(queue[0], "running", false);
@@ -238,6 +242,7 @@
     if(currentIndex >= queue.length){
       running = false;
       $("btnStart").disabled = false;
+      $("btnStop").disabled = true;
       setProgress(100);
       setStatusWithPlate("", "done", false);
       resetLog();
@@ -258,6 +263,7 @@
       appendLogLine(await res.text());
       running = false;
       $("btnStart").disabled = false;
+      $("btnStop").disabled = true;
       return;
     }
 
@@ -272,9 +278,17 @@
 
       if(d.status === "done"){
         closeStreams();
-        resetLog(); // 单个下载完成清空日志
+        resetLog();
         currentIndex += 1;
         await runNext();
+      }
+      if(d.status === "stopped"){
+        closeStreams();
+        setStatusWithPlate(plate, "stopped", false);
+        running = false;
+        $("btnStart").disabled = false;
+        $("btnStop").disabled = true;
+        setTimeout(()=>resetLog(), 150);
       }
       if(d.status === "error"){
         closeStreams();
@@ -282,6 +296,7 @@
         setTimeout(()=>resetLog(), 200);
         running = false;
         $("btnStart").disabled = false;
+        $("btnStop").disabled = true;
       }
     };
 
@@ -292,7 +307,25 @@
     };
   }
 
-  // 输入框随内容自动增高
+  async function stopAll(){
+    // 立刻断开 SSE，避免页面还在刷
+    closeStreams();
+
+    // UI 先切回可用状态
+    running = false;
+    $("btnStart").disabled = false;
+    $("btnStop").disabled = true;
+    setProgress(0);
+    setStatusWithPlate("", "stopped", false);
+    resetLog();
+
+    try{
+      await fetch("/api/stop", { method:"POST" });
+    }catch(e){
+      // 忽略网络小波动
+    }
+  }
+
   function autoResize(){
     const ta = $("plate");
     ta.style.height = "40px";
@@ -301,6 +334,7 @@
   }
 
   $("btnStart").addEventListener("click", startQueue);
+  $("btnStop").addEventListener("click", stopAll);
   $("plate").addEventListener("input", autoResize);
   window.addEventListener("load", autoResize);
 </script>
