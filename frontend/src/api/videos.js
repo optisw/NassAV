@@ -1,6 +1,6 @@
 import axios from 'axios'
 
-const API_BASE = 'http://192.168.31.61:31471'
+const API_BASE = 'http://100.0.0.5:31471'
 
 export default {
     async getVideoList() {
