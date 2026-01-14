@@ -7,7 +7,7 @@ import queue
 import threading
 import subprocess
 import shutil
-from typing import Dict, Optional, List
+from typing import Dict, Optional
 
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
@@ -35,10 +35,10 @@ TASK_QUEUE: "queue.Queue[dict]" = queue.Queue()
 PERCENT_RE = re.compile(r"(\d{1,3})\s*%")
 MAX_LOG_LINES = 3000
 
-# ---- 停止控制：用 Event 避免竞态 ----
-STOP_EVENT = threading.Event()
-
+# ---- 停止令牌：点一次 stop 就 +1；任务用 token 判断是否该停止 ----
 CONTROL_LOCK = threading.Lock()
+STOP_TOKEN = 0
+
 CURRENT_TASK_ID: Optional[str] = None
 CURRENT_PROC: Optional[subprocess.Popen] = None
 CURRENT_PLATE: Optional[str] = None
@@ -59,17 +59,12 @@ def _append_log(task_id: str, line: str):
         del logs[: len(logs) - MAX_LOG_LINES]
 
 def _safe_remove_plate_dir(save_path: str, plate: str) -> bool:
-    """
-    删除 SavePath/<PLATE>/ 目录（并做路径安全校验）
-    """
     plate = normalize_plate(plate)
     save_path_norm = os.path.normpath(save_path)
     target = os.path.normpath(os.path.join(save_path_norm, plate))
 
-    # target 必须在 save_path 下
     if not (target == save_path_norm or target.startswith(save_path_norm + os.sep)):
         return False
-
     if os.path.isdir(target):
         shutil.rmtree(target, ignore_errors=True)
         return True
@@ -87,8 +82,14 @@ def guess_output_file(save_path: str, plate: str) -> Optional[str]:
                 return os.path.join(folder, fn)
     return None
 
+def _current_stop_token() -> int:
+    with CONTROL_LOCK:
+        return STOP_TOKEN
+
 def run_download(task_id: str, plate: str):
     global CURRENT_TASK_ID, CURRENT_PROC, CURRENT_PLATE, CURRENT_SAVE_PATH
+
+    my_token = _current_stop_token()
 
     try:
         cfg = load_cfg()
@@ -113,7 +114,6 @@ def run_download(task_id: str, plate: str):
         "logs": [],
         "log_seq": 0,
     })
-
     _append_log(task_id, f"[INFO] SavePath：{save_path}")
     _append_log(task_id, f"[INFO] 执行：{VENV_PY} main.py {plate}")
 
@@ -139,11 +139,15 @@ def run_download(task_id: str, plate: str):
         CURRENT_SAVE_PATH = save_path
 
     last_percent = 0
+    stopped = False
+
     try:
         assert proc.stdout is not None
 
         for raw in proc.stdout:
-            if STOP_EVENT.is_set():
+            # ✅ 如果 stop token 变化，表示用户点了停止
+            if _current_stop_token() != my_token:
+                stopped = True
                 _append_log(task_id, "[INFO] 收到停止指令，正在终止…")
                 break
 
@@ -168,11 +172,11 @@ def run_download(task_id: str, plate: str):
                 "updated_at": time.time(),
             })
 
-        # 让进程结束（如果 stop 已经触发，通常这里会很快）
+        # 等进程结束
         code = proc.wait()
 
-        # ✅ 无论退出码是什么，只要 STOP_EVENT 触发，就按“停止”处理，并删除目录
-        if STOP_EVENT.is_set():
+        # ✅ 无论退出码，只要 stop token 变了，都按停止处理+删目录
+        if stopped or (_current_stop_token() != my_token):
             try:
                 if proc.poll() is None:
                     proc.kill()
@@ -220,29 +224,17 @@ def run_download(task_id: str, plate: str):
 
     finally:
         with CONTROL_LOCK:
-            CURRENT_TASK_ID = None
-            CURRENT_PROC = None
-            CURRENT_PLATE = None
-            CURRENT_SAVE_PATH = None
-        # ✅ 在当前任务收尾后再清 stop 标志，避免竞态
-        if STOP_EVENT.is_set():
-            STOP_EVENT.clear()
+            if CURRENT_TASK_ID == task_id:
+                CURRENT_TASK_ID = None
+                CURRENT_PROC = None
+                CURRENT_PLATE = None
+                CURRENT_SAVE_PATH = None
 
 def worker_loop():
     while True:
         item = TASK_QUEUE.get()
         try:
-            if STOP_EVENT.is_set():
-                tid = item["task_id"]
-                TASKS[tid].update({
-                    "status": "stopped",
-                    "percent": 0,
-                    "message": "已停止（未开始执行）",
-                    "updated_at": time.time(),
-                })
-                _append_log(tid, "[INFO] 队列任务已停止（未开始执行）")
-                continue
-
+            # 队列里的任务正常执行；stop 时会在 /api/stop 被清空掉
             run_download(item["task_id"], item["plate"])
         finally:
             TASK_QUEUE.task_done()
@@ -285,14 +277,16 @@ def api_start(plate: str = Form(...)):
 def api_stop():
     """
     一键停止：
-    - 标记 STOP_EVENT
-    - kill 当前进程（如果存在）
-    - 清空队列并标记 stopped
-    注意：STOP_EVENT 不在这里清，等 run_download 收尾后清，确保能触发删目录。
+    - STOP_TOKEN += 1（让当前任务立即识别停止）
+    - kill 当前进程（如果有）
+    - 清空队列中尚未开始的任务，并标记 stopped
+    - 兜底删除当前车牌目录
     """
-    STOP_EVENT.set()
+    global STOP_TOKEN
 
     with CONTROL_LOCK:
+        STOP_TOKEN += 1
+        token_now = STOP_TOKEN
         proc = CURRENT_PROC
         running_tid = CURRENT_TASK_ID
         running_plate = CURRENT_PLATE
@@ -305,7 +299,6 @@ def api_stop():
         except Exception:
             pass
 
-    # 清空队列
     cleared = 0
     while True:
         try:
@@ -325,18 +318,20 @@ def api_stop():
         finally:
             TASK_QUEUE.task_done()
 
-    # ✅ 再做一次兜底：如果目录已经创建但 run_download 还未来得及清理，这里也尝试删除
     removed = False
+    running_dir = None
     if running_plate and running_save:
+        running_dir = os.path.join(running_save, normalize_plate(running_plate))
         removed = _safe_remove_plate_dir(running_save, running_plate)
 
     return {
         "ok": True,
+        "stop_token": token_now,
         "running_task_id": running_tid,
         "running_plate": running_plate,
         "cleared": cleared,
         "removed_running_dir": removed,
-        "running_dir": (os.path.join(running_save, normalize_plate(running_plate)) if running_plate and running_save else None)
+        "running_dir": running_dir
     }
 
 @app.get("/api/progress/{task_id}")
