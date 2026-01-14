@@ -3,26 +3,55 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>NassAV</title>
+  <title>AVTool</title>
   <style>
     :root { --bg:#0b1220; --card:#121b2f; --text:#e8eefc; --muted:#9bb0d1; --accent:#306DF1; --danger:#ff5a7a; }
-    body{margin:0;background:linear-gradient(180deg,#060b16,#0b1220);color:var(--text);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
+
+    /* ✅ 修复“上下两块背景色”问题：html/body 同底色 + body 100vh */
+    html, body{
+      height:100%;
+      background-color:var(--bg);
+    }
+    body{
+      margin:0;
+      min-height:100vh;
+      background-color:var(--bg);
+      color:var(--text);
+      font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto;
+    }
+
     .wrap{max-width:760px;margin:40px auto;padding:0 16px}
-    .card{background:rgba(18,27,47,.9);border:1px solid rgba(255,255,255,.08);border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.35);padding:18px}
-    h1{font-size:20px;margin:0 0 12px 0;letter-spacing:.5px}
+
+    /* ✅ 卡片不透明，避免透底造成“分层”错觉 */
+    .card{
+      background:var(--card);
+      border:1px solid rgba(255,255,255,.08);
+      border-radius:16px;
+      box-shadow:0 12px 40px rgba(0,0,0,.35);
+      padding:18px
+    }
+
+    /* ✅ 标题不加粗 */
+    h1{
+      font-size:20px;
+      margin:0 0 12px 0;
+      letter-spacing:.5px;
+      font-weight:400;
+    }
 
     .row{display:flex;gap:10px;align-items:flex-start}
 
-    /* 输入框：默认高度≈按钮高度，自动随行数增高 */
+    /* 输入框：默认高度≈按钮高度，自动随行数增高；隐藏滚动条（仍可滚动） */
     textarea{
       flex:1;
       min-width:260px;
-      height:40px;                /* ✅ 默认高度=按钮高度 */
-      max-height:220px;           /* ✅ 增高到上限后内部滚动 */
+      height:40px;
+      max-height:220px;
       resize:none;
       overflow:auto;
 
-      background:#0a1225;border:1px solid rgba(255,255,255,.12);
+      background:#0a1225;
+      border:1px solid rgba(255,255,255,.12);
       color:var(--text);
       padding:9px 12px;
       border-radius:10px;
@@ -30,29 +59,38 @@
       line-height:1.4;
       box-sizing:border-box;
 
-      /* ✅ 隐藏滚动条（仍可滚动） */
-      scrollbar-width:none;       /* Firefox */
-      -ms-overflow-style:none;    /* IE/Edge(old) */
+      scrollbar-width:none;
+      -ms-overflow-style:none;
     }
-    textarea::-webkit-scrollbar{  /* Chrome/Safari */
-      width:0;height:0;
-    }
+    textarea::-webkit-scrollbar{ width:0;height:0; }
 
-    /* 下载按钮：正方形、#306DF1、白字、无圆角 */
+    /* ✅ 按钮：圆角、与输入框等高、#306DF1、白字、不加粗 */
     button{
-      width:40px;height:40px;     /* ✅ 方形 */
+      height:40px;
+      padding:0 16px;
       background:var(--accent);
       border:none;
       color:#ffffff;
-      padding:0;
-      border-radius:0;            /* ✅ 无圆角 */
+      border-radius:10px;
       cursor:pointer;
-      font-weight:700;
+      font-weight:400;
+      white-space:nowrap;
     }
     button:disabled{opacity:.6;cursor:not-allowed}
 
-    .bar{height:12px;background:#0a1225;border-radius:999px;overflow:hidden;border:1px solid rgba(255,255,255,.12)}
-    .bar > div{height:100%;width:0%;background:linear-gradient(90deg,#306DF1,#7cf6ff);transition:width .25s ease}
+    .bar{
+      height:12px;
+      background:#0a1225;
+      border-radius:999px;
+      overflow:hidden;
+      border:1px solid rgba(255,255,255,.12)
+    }
+    .bar > div{
+      height:100%;
+      width:0%;
+      background:linear-gradient(90deg,#306DF1,#7cf6ff);
+      transition:width .25s ease
+    }
 
     .meta{
       display:flex;
@@ -64,10 +102,11 @@
     }
     .danger{color:var(--danger)}
 
-    /* ✅ 固定高度日志：只滚内容，不撑页面；隐藏右侧滚动条 */
+    /* 固定高度日志：只滚内容，不撑页面；隐藏滚动条 */
     .logwrap{
       margin-top:10px;
-      background:#0a1225;border:1px solid rgba(255,255,255,.08);
+      background:#0a1225;
+      border:1px solid rgba(255,255,255,.08);
       border-radius:12px;
       padding:10px 12px;
     }
@@ -81,15 +120,13 @@
       scrollbar-width:none;
       -ms-overflow-style:none;
     }
-    .log::-webkit-scrollbar{
-      width:0;height:0;
-    }
+    .log::-webkit-scrollbar{ width:0;height:0; }
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="card">
-      <h1>NassAV</h1>
+      <h1>AVTool</h1>
 
       <div class="row">
         <textarea id="plate" placeholder="例如：XXX-001"></textarea>
@@ -101,7 +138,7 @@
 
       <div class="meta">
         <div id="percent">0%</div>
-        <!-- ✅ 右下角：车牌号 | 状态... -->
+        <!-- 右下角：当前车牌 | 状态... -->
         <div id="status">就绪</div>
       </div>
 
@@ -199,12 +236,11 @@
     closeStreams();
 
     if(currentIndex >= queue.length){
-      // 全部完成
       running = false;
       $("btnStart").disabled = false;
       setProgress(100);
       setStatusWithPlate("", "done", false);
-      resetLog(); // ✅ 全部完成清空日志
+      resetLog();
       return;
     }
 
@@ -213,7 +249,6 @@
     setStatusWithPlate(plate, "running", false);
     resetLog();
 
-    // 提交任务
     const fd = new FormData();
     fd.append("plate", plate);
 
@@ -229,32 +264,27 @@
     const data = await res.json();
     const taskId = data.task_id;
 
-    // 订阅进度
     esProgress = new EventSource(`/api/progress/${taskId}/stream`);
     esProgress.onmessage = async (evt)=>{
       const d = JSON.parse(evt.data);
       setProgress(d.percent || 0);
-
-      // ✅ 右下角显示：车牌号 | 状态...
       setStatusWithPlate(plate, d.status, d.status === "error");
 
       if(d.status === "done"){
         closeStreams();
-        resetLog();           // ✅ 单个下载完成就清空日志
+        resetLog(); // 单个下载完成清空日志
         currentIndex += 1;
         await runNext();
       }
       if(d.status === "error"){
         closeStreams();
         setStatusWithPlate(plate, "error", true);
-        // 失败后也清空回初始（你之前的“完成后清空”逻辑，我保持一致）
         setTimeout(()=>resetLog(), 200);
         running = false;
         $("btnStart").disabled = false;
       }
     };
 
-    // 订阅日志（逐行追加）
     esLog = new EventSource(`/api/logs/${taskId}/stream`);
     esLog.onmessage = (evt)=>{
       const item = JSON.parse(evt.data); // {seq, line}
@@ -262,10 +292,10 @@
     };
   }
 
-  // ✅ 输入框随内容自动增高
+  // 输入框随内容自动增高
   function autoResize(){
     const ta = $("plate");
-    ta.style.height = "40px"; // 回到初始高度再测
+    ta.style.height = "40px";
     const newH = Math.min(220, ta.scrollHeight);
     ta.style.height = newH + "px";
   }
