@@ -19,7 +19,7 @@
         {
             "downloaderName": "Jable",
             "domain": "jable.tv",
-            "weight": 1500
+            "weight": 500
         },
         {
             "downloaderName": "HohoJ",
@@ -29,27 +29,27 @@
         {
             "downloaderName": "Memo",
             "domain": "memojav.com",
-            "weight": 600
+            "weight": 300
         },
         {
             "downloaderName": "KanAV",
             "domain": "kanav.info",
-            "weight": 490
+            "weight": 200
         },
         {
             "downloaderName": "AvToday",
             "domain": "avtoday.io",
-            "weight": 0
+            "weight": 100
         },
         {
             "downloaderName": "NetFlav",
             "domain": "netflav.com",
-            "weight": 0
+            "weight": 100
         },
         {
             "downloaderName": "KissAv",
             "domain": "f15.bzraizy.cc",
-            "weight": 0
+            "weight": 100
         }
     ]
 }
