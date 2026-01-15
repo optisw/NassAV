@@ -38,6 +38,9 @@ TASK_LOCK = threading.Lock()
 RUNNER_THREAD: Optional[threading.Thread] = None
 RUNNER_STOP = threading.Event()
 
+PENDING_QUEUE: List[str] = []
+QUEUE_COND = threading.Condition(TASK_LOCK)
+
 CURRENT_TASK_ID: Optional[str] = None
 
 PERCENT_RE = re.compile(r"(\d{1,3})%")
@@ -59,7 +62,19 @@ def _persist_state():
             "current_task_id": CURRENT_TASK_ID,
             "tasks": TASKS,
         }
-        APP_STATE_PATH.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+        old: Dict[str, Any] = {}
+        try:
+            if APP_STATE_PATH.exists():
+                old = json.loads(APP_STATE_PATH.read_text(encoding="utf-8")) or {}
+        except Exception:
+            old = {}
+
+        if not isinstance(old, dict):
+            old = {}
+
+        old.update(state)
+        APP_STATE_PATH.write_text(json.dumps(old, ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
 
@@ -134,7 +149,7 @@ def _task_init(task_id: str, plate: str):
         TASKS[task_id] = {
             "task_id": task_id,
             "plate": plate,
-            "status": "running",
+            "status": "queued",
             "percent": 0,
             "message": "",
             "created_at": _now_ts(),
@@ -271,16 +286,28 @@ def run_download(task_id: str, plate: str):
             pass
         _persist_task(task_id)
 
-def runner_loop(queue: List[str], task_ids: List[str]):
-    """按队列顺序逐个执行"""
+def runner_loop():
+    """后台线程：按入队顺序逐个执行"""
     global RUNNER_THREAD
     try:
-        for i, plate in enumerate(queue):
-            if RUNNER_STOP.is_set():
-                break
-            task_id = task_ids[i]
+        while not RUNNER_STOP.is_set():
+            with QUEUE_COND:
+                if not PENDING_QUEUE:
+                    break
+                task_id = PENDING_QUEUE.pop(0)
+
+            with TASK_LOCK:
+                t = TASKS.get(task_id)
+                plate = (t.get("plate") if t else "") or ""
+                plate = plate.strip().upper()
+                if not t or not plate:
+                    continue
+                t.update({"status": "running", "updated_at": _now_ts()})
+            _persist_task(task_id)
+
             _set_current_task(task_id)
             run_download(task_id, plate)
+
         _set_current_task(None)
     finally:
         RUNNER_STOP.clear()
@@ -331,27 +358,12 @@ def api_start(plate: str = Form(...)):
     task_id = uuid.uuid4().hex
     _task_init(task_id, plate)
 
-    with TASK_LOCK:
-        plan = []
-        try:
-            if APP_STATE_PATH.exists():
-                old = json.loads(APP_STATE_PATH.read_text(encoding="utf-8"))
-                plan = old.get("plan") or []
-        except Exception:
-            plan = []
+    with QUEUE_COND:
+        PENDING_QUEUE.append(task_id)
 
-    if plan:
-        queue = plan
-        task_ids = []
-        queue = [plate]
-        task_ids = [task_id]
-    else:
-        queue = [plate]
-        task_ids = [task_id]
-
-    if RUNNER_THREAD is None:
+    if RUNNER_THREAD is None or not RUNNER_THREAD.is_alive():
         RUNNER_STOP.clear()
-        RUNNER_THREAD = threading.Thread(target=runner_loop, args=(queue, task_ids), daemon=True)
+        RUNNER_THREAD = threading.Thread(target=runner_loop, daemon=True)
         RUNNER_THREAD.start()
 
     return JSONResponse({"task_id": task_id})
@@ -359,6 +371,13 @@ def api_start(plate: str = Form(...)):
 @app.post("/api/stop")
 def api_stop():
     RUNNER_STOP.set()
+
+    try:
+        with QUEUE_COND:
+            PENDING_QUEUE.clear()
+    except Exception:
+        pass
+
     try:
         if CURRENT_TASK_ID and CURRENT_TASK_ID in TASKS:
             pid = TASKS[CURRENT_TASK_ID].get("pid")
@@ -373,7 +392,7 @@ def api_stop():
 
 @app.get("/api/status")
 def api_status():
-    """用于刷新/新设备：恢复当前正在运行的任务状态"""
+    """恢复当前正在运行的任务状态"""
     with TASK_LOCK:
         tid = CURRENT_TASK_ID
         if not tid or tid not in TASKS:
