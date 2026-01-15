@@ -87,20 +87,94 @@
     .bar{ height:12px;background:#0a1225;border-radius:999px;overflow:hidden;border:1px solid rgba(255,255,255,.12) }
     .bar > div{ height:100%;width:0%; background:linear-gradient(90deg,var(--accent1),var(--accent2)); transition:width .25s ease }
 
-    .meta{ display:flex;justify-content:space-between;gap:8px; color:var(--muted);font-size:12px;margin-top:8px }
+    .meta{ display:flex;justify-content:space-between;gap:8px; color:var(--muted);font-size:12px;margin-top:8px; align-items:center; }
     .danger{color:var(--danger)}
+
+    .meta-right{
+      display:flex;
+      align-items:center;
+      gap:8px;
+      justify-content:flex-end;
+      min-width:0;
+    }
 
     .logwrap{
       margin-top:10px;
       background:#0a1225;border:1px solid rgba(255,255,255,.08);
       border-radius:12px;padding:10px 12px;
     }
+
+    .loghead{
+      display:none;
+    }
+
+    .btn-history{
+      height:22px;
+      padding:0 8px;
+      border-radius:7px;
+      border:1px solid rgba(255,255,255,.12);
+      background:rgba(255,255,255,.06);
+      color:var(--text);
+      cursor:pointer;
+      font-weight:400;
+      white-space:nowrap;
+      font-size:12px;
+      line-height:22px;
+    }
+    .btn-history.active{
+      background:rgba(255,255,255,.10);
+      border-color:rgba(255,255,255,.18);
+    }
+
     .log{
       height:220px;overflow-y:auto;white-space:pre-wrap;
       color:var(--muted);font-size:12px;
       scrollbar-width:none; -ms-overflow-style:none;
     }
     .log::-webkit-scrollbar{ width:0;height:0; }
+
+    .hist-grid{
+      display:grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap:18px;
+      align-items:start;
+    }
+    .hist-col{ min-width:0; }
+    .hist-title{
+      color:var(--text);
+      font-size:12px;
+      text-align:center;
+      padding:4px 0 6px 0;
+      border-bottom:1px solid rgba(255,255,255,.10);
+      margin-bottom:6px;
+    }
+    .hist-item{
+      font-size:12px;
+      text-align:center;
+      padding:2px 0;
+      word-break:break-all;
+    }
+    .hist-empty{
+      font-size:12px;
+      text-align:center;
+      opacity:.6;
+      padding:2px 0;
+    }
+
+    .btnrow{
+      display:flex;
+      gap:10px;
+      align-items:flex-start;
+    }
+
+    @media (max-width: 520px){
+      .row{ flex-direction:column; align-items:stretch; }
+      textarea{ min-width:0; width:100%; }
+      .btnrow{ width:100%; }
+      .btnrow .btn{ flex:1; width:auto; }
+      .meta{ flex-wrap:wrap; }
+      .meta-right{ width:auto; }
+    }
   </style>
 </head>
 <body>
@@ -110,8 +184,11 @@
 
       <div class="row">
         <textarea id="plate" placeholder="例如：XXX-001"></textarea>
-        <button id="btnStop" class="btn btn-stop" disabled>停止</button>
-        <button id="btnStart" class="btn btn-primary">下载</button>
+
+        <div class="btnrow">
+          <button id="btnStop" class="btn btn-stop" disabled>停止</button>
+          <button id="btnStart" class="btn btn-primary">下载</button>
+        </div>
       </div>
 
       <div style="height:12px"></div>
@@ -119,10 +196,17 @@
 
       <div class="meta">
         <div id="percent">0%</div>
-        <div id="status">就绪</div>
+
+        <div class="meta-right">
+          <button id="btnHistory" class="btn-history">下载历史</button>
+          <div id="status">就绪</div>
+        </div>
       </div>
 
       <div class="logwrap">
+        <div class="loghead">
+          <div id="logtitle"></div>
+        </div>
         <div class="log" id="log">等待操作…</div>
       </div>
     </div>
@@ -139,6 +223,8 @@
   let running = false;
 
   const MAX_LOG_CHARS = 50000;
+  let logBuffer = "等待操作…";
+  let showHistory = false;
 
   function setProgress(p){
     p = Math.max(0, Math.min(100, p||0));
@@ -155,23 +241,39 @@
 
   function setStatusWithPlate(plate, status, danger=false){
     const left = (plate && plate.trim()) ? plate.trim().toUpperCase() + " | " : "";
-    $("status").innerText = left + statusTextFrom(status);
+    const txt = left + statusTextFrom(status);
+    $("status").innerText = txt;
     $("status").className = danger ? "danger" : "";
+    $("logtitle").innerText = txt;
   }
 
   function resetLog(){
-    $("log").innerText = "等待操作…";
-    $("log").scrollTop = 0;
+    logBuffer = "等待操作…";
+    if(!showHistory){
+      $("log").innerText = logBuffer;
+      $("log").scrollTop = 0;
+    }
   }
 
   function appendLogLine(line){
-    let cur = $("log").innerText || "";
+    if(!line) return;
+    let cur = logBuffer || "";
     if(cur === "等待操作…") cur = "";
-    cur += (line + "\n");
+
+    if(cur){
+      cur += "\n" + line;
+    }else{
+      cur = line;
+    }
+
     if(cur.length > MAX_LOG_CHARS){
       cur = cur.slice(cur.length - MAX_LOG_CHARS);
+      cur = cur.replace(/^\n+/, "");
     }
-    $("log").innerText = cur;
+
+    logBuffer = cur || "等待操作…";
+    if(showHistory) return;
+    $("log").innerText = logBuffer;
     $("log").scrollTop = $("log").scrollHeight;
   }
 
@@ -201,6 +303,12 @@
       resetLog();
       return;
     }
+
+    try{
+      const fdPlan = new FormData();
+      fdPlan.append("plates", $("plate").value || "");
+      await fetch("/api/plan", { method:"POST", body: fdPlan });
+    }catch(e){}
 
     running = true;
     currentIndex = 0;
@@ -239,9 +347,10 @@
     if(!res.ok){
       setStatusWithPlate(plate, "error", true);
       appendLogLine(await res.text());
-      running = false;
-      $("btnStart").disabled = false;
-      $("btnStop").disabled = true;
+      closeStreams();
+      setTimeout(()=>resetLog(), 200);
+      currentIndex += 1;
+      await runNext();
       return;
     }
 
@@ -252,9 +361,11 @@
     esProgress.onmessage = async (evt)=>{
       const d = JSON.parse(evt.data);
       setProgress(d.percent || 0);
-
-      // ✅ 关键修复：显示以服务端返回的 d.plate 为准，不再用闭包 plate
       setStatusWithPlate(d.plate || plate, d.status, d.status === "error");
+
+      if(showHistory){
+        await renderHistory();
+      }
 
       if(d.status === "done"){
         closeStreams();
@@ -274,9 +385,8 @@
         closeStreams();
         setStatusWithPlate(d.plate || plate, "error", true);
         setTimeout(()=>resetLog(), 200);
-        running = false;
-        $("btnStart").disabled = false;
-        $("btnStop").disabled = true;
+        currentIndex += 1;
+        await runNext();
       }
     };
 
@@ -309,10 +419,130 @@
     ta.style.height = newH + "px";
   }
 
+  async function restoreRunningTask(){
+    try{
+      const r = await fetch("/api/status");
+      if(!r.ok) return false;
+      const s = await r.json();
+      if(!s || !s.running || !s.task_id) return false;
+
+      const taskId = s.task_id;
+      const plate = s.plate || "";
+
+      running = true;
+      $("btnStart").disabled = true;
+      $("btnStop").disabled = false;
+
+      setProgress(s.percent || 0);
+      setStatusWithPlate(plate, s.status || "running", s.status === "error");
+      resetLog();
+
+      closeStreams();
+
+      esProgress = new EventSource(`/api/progress/${taskId}/stream`);
+      esProgress.onmessage = async (evt)=>{
+        const d = JSON.parse(evt.data);
+        setProgress(d.percent || 0);
+        setStatusWithPlate(d.plate || plate, d.status, d.status === "error");
+
+        if(showHistory){
+          await renderHistory();
+        }
+
+        if(d.status === "done"){
+          closeStreams();
+          resetLog();
+          running = false;
+          $("btnStart").disabled = false;
+          $("btnStop").disabled = true;
+        }
+        if(d.status === "stopped"){
+          closeStreams();
+          setStatusWithPlate(d.plate || plate, "stopped", false);
+          running = false;
+          $("btnStart").disabled = false;
+          $("btnStop").disabled = true;
+          setTimeout(()=>resetLog(), 150);
+        }
+        if(d.status === "error"){
+          closeStreams();
+          setStatusWithPlate(d.plate || plate, "error", true);
+          running = false;
+          $("btnStart").disabled = false;
+          $("btnStop").disabled = true;
+          setTimeout(()=>resetLog(), 200);
+        }
+      };
+
+      esLog = new EventSource(`/api/logs/${taskId}/stream`);
+      esLog.onmessage = (evt)=>{
+        const item = JSON.parse(evt.data);
+        appendLogLine(item.line);
+      };
+
+      return true;
+    }catch(e){
+      return false;
+    }
+  }
+
+  async function renderHistory(){
+    try{
+      const r = await fetch("/api/history");
+      if(!r.ok) throw new Error("history");
+      const d = await r.json();
+
+      const done = d.done || [];
+      const waiting = d.waiting || [];
+      const failed = d.error || [];
+
+      const col = (title, arr)=>{
+        const items = (arr && arr.length)
+          ? arr.map(p=>`<div class="hist-item">${p}</div>`).join("")
+          : `<div class="hist-empty">—</div>`;
+        return `<div class="hist-col"><div class="hist-title">${title}</div>${items}</div>`;
+      };
+
+      $("log").innerHTML = `<div class="hist-grid">
+        ${col("已下载", done)}
+        ${col("等待中", waiting)}
+        ${col("已失败", failed)}
+      </div>`;
+      $("log").scrollTop = 0;
+    }catch(e){
+      $("log").innerText = "暂无记录…";
+    }
+  }
+
+  async function toggleHistory(){
+    showHistory = !showHistory;
+    if(showHistory){
+      $("btnHistory").classList.add("active");
+      await renderHistory();
+    }else{
+      $("btnHistory").classList.remove("active");
+      $("log").innerText = logBuffer || "等待操作…";
+      $("log").scrollTop = $("log").scrollHeight;
+    }
+  }
+
   $("btnStart").addEventListener("click", startQueue);
   $("btnStop").addEventListener("click", stopAll);
   $("plate").addEventListener("input", autoResize);
-  window.addEventListener("load", autoResize);
+  $("btnHistory").addEventListener("click", toggleHistory);
+
+  window.addEventListener("load", async ()=>{
+    autoResize();
+    let ok = await restoreRunningTask();
+    if(!ok){
+      let n = 0;
+      const timer = setInterval(async ()=>{
+        n += 1;
+        const got = await restoreRunningTask();
+        if(got || n >= 8) clearInterval(timer);
+      }, 800);
+    }
+  });
 </script>
 
 </body>
