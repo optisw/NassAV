@@ -56,13 +56,14 @@ def _append_log(task_id: str, line: str):
         if len(TASK_LOGS[task_id]) > 5000:
             TASK_LOGS[task_id] = TASK_LOGS[task_id][-5000:]
 
-def _persist_state():
+def _update_app_state(patch: Dict[str, Any]):
+    """合并更新 /tmp/nassav_webui_state.json，避免覆盖其他字段（如 tasks/plan）"""
     try:
-        state = {
-            "current_task_id": CURRENT_TASK_ID,
-            "tasks": TASKS,
-        }
+        APP_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
 
+    try:
         old: Dict[str, Any] = {}
         try:
             if APP_STATE_PATH.exists():
@@ -73,8 +74,18 @@ def _persist_state():
         if not isinstance(old, dict):
             old = {}
 
-        old.update(state)
+        old.update(patch)
         APP_STATE_PATH.write_text(json.dumps(old, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+def _persist_state():
+    try:
+        state = {
+            "current_task_id": CURRENT_TASK_ID,
+            "tasks": TASKS,
+        }
+        _update_app_state(state)
     except Exception:
         pass
 
@@ -287,7 +298,7 @@ def run_download(task_id: str, plate: str):
         _persist_task(task_id)
 
 def runner_loop():
-    """后台线程：按入队顺序逐个执行"""
+    """按入队顺序逐个执行"""
     global RUNNER_THREAD
     try:
         while not RUNNER_STOP.is_set():
@@ -320,11 +331,6 @@ def index():
 
 @app.post("/api/plan")
 def api_plan(plates: str = Form(...)):
-    try:
-        APP_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
-
     raw = plates or ""
     lines = [x.strip().upper() for x in re.split(r"\r?\n", raw) if x.strip()]
     seen = set()
@@ -335,16 +341,7 @@ def api_plan(plates: str = Form(...)):
             out.append(p)
 
     with TASK_LOCK:
-        state = {"plan": out, "plan_updated_at": _now_ts()}
-        try:
-            if APP_STATE_PATH.exists():
-                old = json.loads(APP_STATE_PATH.read_text(encoding="utf-8"))
-            else:
-                old = {}
-        except Exception:
-            old = {}
-        old.update(state)
-        APP_STATE_PATH.write_text(json.dumps(old, ensure_ascii=False), encoding="utf-8")
+        _update_app_state({"plan": out, "plan_updated_at": _now_ts()})
 
     return JSONResponse({"ok": True, "count": len(out)})
 
@@ -370,11 +367,33 @@ def api_start(plate: str = Form(...)):
 
 @app.post("/api/stop")
 def api_stop():
+    """
+    停止当前下载，并清空“等待中”的列表：
+    - 清空内存队列 PENDING_QUEUE
+    - 清空 state.json 中的 plan（等待列表来源）
+    - 将尚未开始的 queued 任务标记为 stopped（避免残留 queued 状态）
+    """
     RUNNER_STOP.set()
+
+    _force_work_flag("0")
 
     try:
         with QUEUE_COND:
+            pending_ids = list(PENDING_QUEUE)
             PENDING_QUEUE.clear()
+
+        with TASK_LOCK:
+            for tid in pending_ids:
+                t = TASKS.get(tid)
+                if t and t.get("status") == "queued":
+                    t.update(
+                        {
+                            "status": "stopped",
+                            "message": "已停止",
+                            "updated_at": _now_ts(),
+                        }
+                    )
+        _persist_state()
     except Exception:
         pass
 
@@ -388,6 +407,10 @@ def api_stop():
                     pass
     except Exception:
         pass
+
+    with TASK_LOCK:
+        _update_app_state({"plan": [], "plan_updated_at": _now_ts()})
+
     return JSONResponse({"ok": True})
 
 @app.get("/api/status")
