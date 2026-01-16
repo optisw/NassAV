@@ -218,9 +218,8 @@
   let esProgress = null;
   let esLog = null;
 
-  let queue = [];
-  let currentIndex = 0;
   let running = false;
+  let activeTaskId = null;
 
   const MAX_LOG_CHARS = 50000;
   let logBuffer = "等待操作…";
@@ -282,8 +281,9 @@
     if(esLog){ try{ esLog.close(); }catch(e){} esLog = null; }
   }
 
-  function parsePlates(){
-    const raw = $("plate").value || "";
+
+  function parsePlatesText(raw){
+    raw = raw || "";
     const lines = raw.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
     const seen = new Set();
     const out = [];
@@ -294,99 +294,50 @@
     return out;
   }
 
-  async function startQueue(){
-    if(running) return;
+  const sleep = (ms)=>new Promise(r=>setTimeout(r, ms));
 
-    queue = parsePlates();
-    if(queue.length === 0){
-      setStatusWithPlate("", "error", true);
-      resetLog();
-      return;
-    }
-
-    try{
-      const fdPlan = new FormData();
-      fdPlan.append("plates", $("plate").value || "");
-      await fetch("/api/plan", { method:"POST", body: fdPlan });
-    }catch(e){}
-
-    running = true;
-    currentIndex = 0;
-    $("btnStart").disabled = true;
-    $("btnStop").disabled = false;
-
-    setProgress(0);
-    setStatusWithPlate(queue[0], "running", false);
-    resetLog();
-
-    await runNext();
+  function setIdle(){
+    running = false;
+    activeTaskId = null;
+    $("btnStart").disabled = false;
+    $("btnStop").disabled = true;
   }
 
-  async function runNext(){
+  function setRunning(){
+    running = true;
+    $("btnStart").disabled = true;
+    $("btnStop").disabled = false;
+  }
+
+  function attachStreams(taskId){
+    if(!taskId) return;
+    if(activeTaskId === taskId && (esProgress || esLog)) return;
+
     closeStreams();
-
-    if(currentIndex >= queue.length){
-      running = false;
-      $("btnStart").disabled = false;
-      $("btnStop").disabled = true;
-      setProgress(100);
-      setStatusWithPlate("", "done", false);
-      resetLog();
-      return;
-    }
-
-    const plate = queue[currentIndex];
-    setProgress(0);
-    setStatusWithPlate(plate, "running", false);
-    resetLog();
-
-    const fd = new FormData();
-    fd.append("plate", plate);
-
-    const res = await fetch("/api/start", { method:"POST", body: fd });
-    if(!res.ok){
-      setStatusWithPlate(plate, "error", true);
-      appendLogLine(await res.text());
-      closeStreams();
-      setTimeout(()=>resetLog(), 200);
-      currentIndex += 1;
-      await runNext();
-      return;
-    }
-
-    const data = await res.json();
-    const taskId = data.task_id;
+    activeTaskId = taskId;
 
     esProgress = new EventSource(`/api/progress/${taskId}/stream`);
     esProgress.onmessage = async (evt)=>{
       const d = JSON.parse(evt.data);
       setProgress(d.percent || 0);
-      setStatusWithPlate(d.plate || plate, d.status, d.status === "error");
+      setStatusWithPlate(d.plate || "", d.status, d.status === "error");
 
       if(showHistory){
         await renderHistory();
       }
 
-      if(d.status === "done"){
-        closeStreams();
-        resetLog();
-        currentIndex += 1;
-        await runNext();
-      }
       if(d.status === "stopped"){
         closeStreams();
-        setStatusWithPlate(d.plate || plate, "stopped", false);
-        running = false;
-        $("btnStart").disabled = false;
-        $("btnStop").disabled = true;
+        setStatusWithPlate(d.plate || "", "stopped", false);
+        setIdle();
         setTimeout(()=>resetLog(), 150);
+        return;
       }
-      if(d.status === "error"){
+
+      if(d.status === "done" || d.status === "error"){
         closeStreams();
-        setStatusWithPlate(d.plate || plate, "error", true);
-        setTimeout(()=>resetLog(), 200);
-        currentIndex += 1;
-        await runNext();
+        setTimeout(()=>resetLog(), 150);
+        await maybeSwitchToNextTask(taskId);
       }
     };
 
@@ -395,6 +346,80 @@
       const item = JSON.parse(evt.data);
       appendLogLine(item.line);
     };
+  }
+
+  async function maybeSwitchToNextTask(prevTaskId){
+    for(let i=0;i<60;i++){
+      await sleep(500);
+
+      let s = null;
+      try{
+        const r = await fetch("/api/status");
+        if(r.ok) s = await r.json();
+      }catch(e){}
+
+      if(s && s.running && s.task_id){
+        if(s.task_id !== prevTaskId){
+          setRunning();
+          setProgress(s.percent || 0);
+          setStatusWithPlate(s.plate || "", s.status || "running", (s.status === "error"));
+          resetLog();
+          attachStreams(s.task_id);
+          return;
+        }
+        continue;
+      }
+
+      try{
+        const hr = await fetch("/api/history");
+        if(hr.ok){
+          const hd = await hr.json();
+          const waiting = (hd && hd.waiting) ? hd.waiting : [];
+          if(waiting && waiting.length){
+            continue;
+          }
+        }
+      }catch(e){}
+
+      setIdle();
+      return;
+    }
+
+    setIdle();
+  }
+
+  async function startDownload(){
+    if(running) return;
+
+    const raw = $("plate").value || "";
+    const plates = parsePlatesText(raw);
+    if(plates.length === 0){
+      setStatusWithPlate("", "error", true);
+      resetLog();
+      return;
+    }
+
+    setRunning();
+    setProgress(0);
+    setStatusWithPlate(plates[0], "running", false);
+    resetLog();
+
+    const fd = new FormData();
+    fd.append("plate", raw);
+
+    const res = await fetch("/api/start", { method:"POST", body: fd });
+    if(!res.ok){
+      setStatusWithPlate(plates[0], "error", true);
+      appendLogLine(await res.text());
+      closeStreams();
+      setIdle();
+      setTimeout(()=>resetLog(), 200);
+      return;
+    }
+
+    const data = await res.json();
+    const taskId = data.task_id;
+    attachStreams(taskId);
   }
 
   async function stopAll(){
@@ -426,60 +451,12 @@
       const s = await r.json();
       if(!s || !s.running || !s.task_id) return false;
 
-      const taskId = s.task_id;
-      const plate = s.plate || "";
-
-      running = true;
-      $("btnStart").disabled = true;
-      $("btnStop").disabled = false;
-
+      setRunning();
       setProgress(s.percent || 0);
-      setStatusWithPlate(plate, s.status || "running", s.status === "error");
+      setStatusWithPlate(s.plate || "", s.status || "running", s.status === "error");
       resetLog();
 
-      closeStreams();
-
-      esProgress = new EventSource(`/api/progress/${taskId}/stream`);
-      esProgress.onmessage = async (evt)=>{
-        const d = JSON.parse(evt.data);
-        setProgress(d.percent || 0);
-        setStatusWithPlate(d.plate || plate, d.status, d.status === "error");
-
-        if(showHistory){
-          await renderHistory();
-        }
-
-        if(d.status === "done"){
-          closeStreams();
-          resetLog();
-          running = false;
-          $("btnStart").disabled = false;
-          $("btnStop").disabled = true;
-        }
-        if(d.status === "stopped"){
-          closeStreams();
-          setStatusWithPlate(d.plate || plate, "stopped", false);
-          running = false;
-          $("btnStart").disabled = false;
-          $("btnStop").disabled = true;
-          setTimeout(()=>resetLog(), 150);
-        }
-        if(d.status === "error"){
-          closeStreams();
-          setStatusWithPlate(d.plate || plate, "error", true);
-          running = false;
-          $("btnStart").disabled = false;
-          $("btnStop").disabled = true;
-          setTimeout(()=>resetLog(), 200);
-        }
-      };
-
-      esLog = new EventSource(`/api/logs/${taskId}/stream`);
-      esLog.onmessage = (evt)=>{
-        const item = JSON.parse(evt.data);
-        appendLogLine(item.line);
-      };
-
+      attachStreams(s.task_id);
       return true;
     }catch(e){
       return false;
@@ -526,7 +503,7 @@
     }
   }
 
-  $("btnStart").addEventListener("click", startQueue);
+  $("btnStart").addEventListener("click", startDownload);
   $("btnStop").addEventListener("click", stopAll);
   $("plate").addEventListener("input", autoResize);
   $("btnHistory").addEventListener("click", toggleHistory);
