@@ -19,6 +19,8 @@ STATIC_DIR = WEB_DIR / "static"
 
 APP_STATE_PATH = Path("/tmp/nassav_webui_state.json")
 
+DOWNLOAD_DB_PATH = BASE_DIR / "db" / "downloaded.db"
+
 app = FastAPI()
 
 app.add_middleware(
@@ -46,6 +48,50 @@ CURRENT_TASK_ID: Optional[str] = None
 PERCENT_RE = re.compile(r"(\d{1,3})%")
 
 PRODUCT_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".ts"}
+
+def _safe_unlink(p: Path) -> bool:
+    try:
+        if p.exists():
+            p.unlink()
+        return True
+    except Exception:
+        return False
+
+def _reset_webui_default_state(clear_download_db: bool = True):
+    """恢复 WebUI 默认状态
+
+    每次“非批量下载”前恢复默认状态：
+    - 历史记录不带上一次下载
+    - /db/downloaded.db 不带上一次下载
+    """
+    global CURRENT_TASK_ID, RUNNER_THREAD
+
+    RUNNER_STOP.clear()
+    _force_work_flag("0")
+
+    with QUEUE_COND:
+        PENDING_QUEUE.clear()
+
+    with TASK_LOCK:
+        TASKS.clear()
+        TASK_LOGS.clear()
+        CURRENT_TASK_ID = None
+
+    _safe_unlink(APP_STATE_PATH)
+    _update_app_state({"current_task_id": None, "tasks": {}, "plan": [], "plan_updated_at": _now_ts()})
+
+    if clear_download_db:
+        try:
+            DOWNLOAD_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        _safe_unlink(DOWNLOAD_DB_PATH)
+
+    try:
+        if RUNNER_THREAD is not None and (not RUNNER_THREAD.is_alive()):
+            RUNNER_THREAD = None
+    except Exception:
+        pass
 
 def _now_ts() -> float:
     return time.time()
@@ -152,6 +198,25 @@ def _guess_product_file(target_dir: Path, plate: str) -> Optional[Path]:
     candidates.sort(key=lambda x: x.stat().st_size, reverse=True)
     return candidates[0]
 
+def _maybe_cleanup_download_db(save_path: str, plate: str) -> bool:
+    """允许删除目录后重新下载
+
+    先查 /db/downloaded.db 判断是否下载过
+    若已删除成品目录，则清理 downloaded.db，避免“已下载过”导致直接失败
+    """
+    try:
+        if not DOWNLOAD_DB_PATH.exists():
+            return False
+
+        target_dir = Path(save_path) / plate
+        product = _guess_product_file(target_dir, plate)
+        if (not target_dir.exists()) or (product is None):
+            _safe_unlink(DOWNLOAD_DB_PATH)
+            return True
+    except Exception:
+        pass
+    return False
+
 def _iter_sse_json(obj: Dict[str, Any]):
     yield f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 
@@ -178,9 +243,13 @@ def run_download(task_id: str, plate: str):
     save_path = _detect_save_path()
     target_dir = Path(save_path) / plate
 
+    cleaned_db = _maybe_cleanup_download_db(save_path, plate)
+
     _append_log(task_id, f"[INFO] SavePath：{save_path}")
     _append_log(task_id, f"[INFO] 目标目录：{target_dir}")
     _append_log(task_id, f"[INFO] 执行：{BASE_DIR}/bin/python main.py {plate}")
+    if cleaned_db:
+        _append_log(task_id, f"[INFO] 检测到目录缺失/无成品，已清理：{DOWNLOAD_DB_PATH}")
 
     last_percent = 0
     saw_running_singleton_msg = False
@@ -348,30 +417,69 @@ def api_plan(plates: str = Form(...)):
 @app.post("/api/start")
 def api_start(plate: str = Form(...)):
     global RUNNER_THREAD
-    plate = (plate or "").strip().upper()
-    if not plate:
+    raw = plate or ""
+    lines = [x.strip().upper() for x in re.split(r"\r?\n", raw) if x.strip()]
+    seen = set()
+    plates: List[str] = []
+    for p in lines:
+        if p not in seen:
+            seen.add(p)
+            plates.append(p)
+
+    if not plates:
         return JSONResponse({"error": "empty"}, status_code=400)
 
-    task_id = uuid.uuid4().hex
-    _task_init(task_id, plate)
+    is_batch = len(plates) > 1
+
+    try:
+        busy = False
+        with TASK_LOCK:
+            if CURRENT_TASK_ID and CURRENT_TASK_ID in TASKS:
+                st = (TASKS[CURRENT_TASK_ID].get("status") or "").lower()
+                if st in ("running", "queued"):
+                    busy = True
+        with QUEUE_COND:
+            if PENDING_QUEUE:
+                busy = True
+        if RUNNER_THREAD is not None and RUNNER_THREAD.is_alive():
+            busy = True
+        if busy:
+            return JSONResponse({"error": "busy"}, status_code=409)
+    except Exception:
+        pass
+
+    if not is_batch:
+        _reset_webui_default_state(clear_download_db=True)
+        _update_app_state({"plan": [], "plan_updated_at": _now_ts()})
+    else:
+        _update_app_state({"plan": plates, "plan_updated_at": _now_ts()})
+
+    task_ids: List[str] = []
+    first_task_id: Optional[str] = None
+    for p in plates:
+        tid = uuid.uuid4().hex
+        _task_init(tid, p)
+        task_ids.append(tid)
+        if first_task_id is None:
+            first_task_id = tid
 
     with QUEUE_COND:
-        PENDING_QUEUE.append(task_id)
+        PENDING_QUEUE.extend(task_ids)
 
     if RUNNER_THREAD is None or not RUNNER_THREAD.is_alive():
         RUNNER_STOP.clear()
         RUNNER_THREAD = threading.Thread(target=runner_loop, daemon=True)
         RUNNER_THREAD.start()
 
-    return JSONResponse({"task_id": task_id})
+    return JSONResponse({"task_id": first_task_id, "count": len(plates), "batch": is_batch})
 
 @app.post("/api/stop")
 def api_stop():
     """
     停止当前下载，并清空“等待中”的列表：
     - 清空内存队列 PENDING_QUEUE
-    - 清空 state.json 中的 plan（等待列表来源）
-    - 将尚未开始的 queued 任务标记为 stopped（避免残留 queued 状态）
+    - 清空 state.json 中的 plan
+    - 将尚未开始的 queued 任务标记为 stopped
     """
     RUNNER_STOP.set()
 
